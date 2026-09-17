@@ -1,0 +1,139 @@
+name: CEREBRON Collatz Farm 05 Literature C256
+
+on:
+  push:
+    paths:
+      - '.github/workflows/literature-farm.yml'
+      - 'mission/**'
+      - 'scripts/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  collect-web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python scripts/literature_search.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: literature-c256-web-raw
+          path: literature-results.json
+          retention-days: 14
+
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          R=[
+          ('COLLATZ_LITERATURE_SCOUT','llama3b','llama-3.2','Collatz prior art and cycle literature'),
+          ('RECENT_PREPRINT_SCOUT','gemma9b','gemma-2','recent Collatz and near-critical coding preprints'),
+          ('STURMIAN_LITERATURE_SCOUT','gemma9b','gemma-2','Sturmian/mechanical words and return words'),
+          ('ROTATION_THEOREM_SCOUT','gemma9b','gemma-2','irrational rotations and first-return theorems'),
+          ('PADIC_LITERATURE_SCOUT','llama3b','llama-3.2','2-adic Collatz literature'),
+          ('THREE_ADIC_LITERATURE_SCOUT','gemma9b','gemma-2','3-adic/backward endpoint literature'),
+          ('DIOPHANTINE_LITERATURE_SCOUT','gemma9b','gemma-2','continued fractions and log2(3) approximation'),
+          ('ERGODIC_LITERATURE_SCOUT','gemma9b','gemma-2','ergodic/spectral approaches'),
+          ('TRANSFER_OPERATOR_SCOUT','llama3b','llama-3.2','transfer and regeneration operators'),
+          ('KNOWN_NO_GO_SCOUT','llama3b','llama-3.2','known failed proof patterns and limitations'),
+          ('THEOREM_EXTRACTOR_A','llama3b','llama-3.2','extract exact usable theorems'),
+          ('THEOREM_EXTRACTOR_B','gemma9b','gemma-2','independent theorem extraction'),
+          ('PRIOR_ART_AUDITOR','gemma9b','gemma-2','check novelty and prior art'),
+          ('SOURCE_QUALITY_AUDITOR','gemma9b','gemma-2','rank source authority and caveats'),
+          ('CLAIM_SOURCE_MATCHER','llama3b','llama-3.2','match claims to exact sources'),
+          ('COUNTEREXAMPLE_SOURCE_SCOUT','llama3b','llama-3.2','published counterexamples to lemmas/heuristics'),
+          ('RESEARCH_GAP_ANALYST','gemma9b','gemma-2','identify unresolved gaps from literature'),
+          ('METHOD_TRANSFER_SCOUT','llama3b','llama-3.2','methods transferable from adjacent fields'),
+          ('SYNTHESIZER','gemma9b','gemma-2','merge source-backed findings only'),
+          ('JUDGE','gemma9b','gemma-2','classify usable/nonusable prior art')]
+          print('matrix='+json.dumps({'include':[{'role':r,'model_id':m,'family':f,'focus':x} for r,m,f,x in R]},separators=(',',':')))
+          PY
+
+  literature-agent:
+    needs: [collect-web,plan]
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install --quiet hf-gradio
+      - uses: actions/download-artifact@v4
+        with:
+          name: literature-c256-web-raw
+          path: webraw
+      - name: Analyze real literature results
+        env:
+          ROLE: ${{ matrix.role }}
+          MODEL_ID: ${{ matrix.model_id }}
+          FAMILY: ${{ matrix.family }}
+          FOCUS: ${{ matrix.focus }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json,os,importlib.util,hashlib
+          from pathlib import Path
+          spec=importlib.util.spec_from_file_location('fw','worker/farm_worker.py'); fw=importlib.util.module_from_spec(spec); spec.loader.exec_module(fw)
+          reg={'llama3b':'huggingface-projects/llama-3.2-3B-Instruct','gemma9b':'huggingface-projects/gemma-2-9b-it'}
+          role=os.environ['ROLE']; mid=os.environ['MODEL_ID']; fam=os.environ['FAMILY']; focus=os.environ['FOCUS']
+          mission=Path('mission/C256-LITERATURE-FARM.md').read_text()
+          raw=Path('webraw/literature-results.json').read_text()
+          prompt=f'''CEREBRON OMEGA — FARM 05 LITERATURE\nROLE: {role}\nFOCUS: {focus}\n\n{mission}\n\nREAL RETRIEVED WEB/LITERATURE DATA:\n{raw[:45000]}\n\nRULES: cite exact title+URL from retrieved data; do not invent sources; SOURCE != PROOF; distinguish source statement / derivation / analogy; identify relevance to current C256 lock.'''
+          ok,text,meta=fw.invoke(reg[mid],prompt)
+          result={'schema':'cerebron-literature-farm-c256-v1','role':role,'model_id':mid,'model_family':fam,'ok':bool(ok),'response':text if ok else None,'response_sha256':hashlib.sha256(text.encode()).hexdigest() if ok and text else None,'meta':meta,'evidence_status':'SOURCE_BACKED_BUT_UNAUDITED' if ok else 'NO_EXTERNAL_OUTPUT'}
+          Path('out/result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: literature-c256-${{ matrix.role }}
+          path: out/result.json
+          retention-days: 14
+
+  omega-fusion:
+    needs: literature-agent
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: literature-c256-*
+          path: results
+          merge-multiple: false
+      - shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=[]
+          for p in Path('results').rglob('result.json'):
+            try: rows.append(json.loads(p.read_text()))
+            except: pass
+          ok=[r for r in rows if r.get('ok')]
+          Path('literature-c256-accounting.json').write_text(json.dumps({'schema':'cerebron-literature-c256-omega-v1','artifact_rows':len(rows),'successful_external_ai_calls':len(ok),'successful_model_families':sorted({r.get('model_family') for r in ok}),'successful_roles':sorted({r.get('role') for r in ok}),'claim_note':'Source-backed outputs remain unaudited until Master Hub verification.'},ensure_ascii=False,indent=2)+'\n')
+          Path('literature-c256-packet.txt').write_text('\n\n'.join('ROLE '+str(r.get('role'))+' | '+str(r.get('model_family'))+'\n'+str(r.get('response') or '') for r in ok))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: literature-c256-omega-packet
+          path: |
+            literature-c256-accounting.json
+            literature-c256-packet.txt
+          retention-days: 14
