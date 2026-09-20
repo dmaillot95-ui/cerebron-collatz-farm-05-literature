@@ -1,6 +1,8 @@
 name: CEREBRON Collatz Farm 05 Literature C256
 
 on:
+  schedule:
+    - cron: '*/15 * * * *'
   push:
     paths:
       - '.github/workflows/literature-farm.yml'
